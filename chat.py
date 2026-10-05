@@ -1,12 +1,16 @@
 import os
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
-from main import get_customer_transactions
-from datetime import date
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from typing import Literal
+from langchain_core.messages import AIMessage
+from langgraph.graph import StateGraph, MessagesState, START, END
+
+from main import get_customer_transactions
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -23,6 +27,74 @@ def list_my_transactions() -> list[dict]:
     """
     return get_customer_transactions(CURRENT_CUSTOMER_ID)
 
+def build_graph(model: ChatOpenAI):
+    # Autorise le modèle à demander l'exécution de cet outil.
+    model_with_tools = model.bind_tools([list_my_transactions])
+
+    def call_model(state: MessagesState):
+        # Envoie tout l'historique au modèle et ajoute sa réponse au graphe.
+        response = model_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+
+    def execute_tools(state: MessagesState):
+        # Seul le dernier message peut contenir les demandes d'outils à exécuter.
+        last_message = state["messages"][-1]
+
+        if not isinstance(last_message, AIMessage):
+            raise TypeError("Un message du modèle était attendu.")
+
+        results = []
+
+        for tool_call in last_message.tool_calls:
+            # Refuse toute demande d'outil qui n'est pas autorisée.
+            if tool_call["name"] != "list_my_transactions":
+                raise ValueError(
+                    f"Outil inconnu : {tool_call['name']}"
+                )
+
+            print("\n[Consultation des transactions...]")
+
+            # Exécute l'outil demandé et conserve son résultat dans l'historique.
+            tool_message = list_my_transactions.invoke(tool_call)
+            results.append(tool_message)
+
+        return {"messages": results}
+
+    def choose_next_step(
+            state: MessagesState,
+    ) -> Literal["tools", "finish"]:
+        # Après la réponse du modèle, exécute ses outils s'il en a demandé;
+        # sinon, le graphe peut se terminer.
+        last_message = state["messages"][-1]
+
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            return "tools"
+
+        return "finish"
+
+    # Définit les deux étapes du graphe : réponse du modèle et exécution d'outils.
+    builder = StateGraph(MessagesState)
+
+    builder.add_node("assistant", call_model)
+    builder.add_node("tools", execute_tools)
+
+    # Commence par le modèle, puis choisit entre l'exécution d'outils et la fin.
+    builder.add_edge(START, "assistant")
+
+    builder.add_conditional_edges(
+        "assistant",
+        choose_next_step,
+        {
+            "tools": "tools",
+            "finish": END,
+        },
+    )
+
+    # Après un outil, retourne au modèle pour qu'il réponde avec son résultat.
+    builder.add_edge("tools", "assistant")
+
+    # Compile la définition en graphe exécutable.
+    return builder.compile()
 
 def main() -> None:
     if not os.getenv("OPENAI_API_KEY"):
@@ -33,7 +105,7 @@ def main() -> None:
         reasoning_effort="none",
     )
 
-    model_with_tools = model.bind_tools([list_my_transactions])
+    graph = build_graph(model)
 
     messages: list[BaseMessage] = [
         SystemMessage(
@@ -66,44 +138,33 @@ def main() -> None:
             Tu peux uniquement consulter les transactions.
             Tu ne peux pas encore créer de réclamation ou effectuer de remboursement.
             """,
-        ),
-        HumanMessage(
-            content="J’ai retiré 100 000 FCFA hier. Mon compte a été débité "
-                "mais le distributeur ne m’a rien donné.",
-        ),
+        )
     ]
 
-    # 1. Le modèle reçoit la demande et peut demander un outil.
-    response = model_with_tools.invoke(messages)
+    print("NovBank — Bonjour, comment puis-je vous aider ?")
+    print("Tapez 'quitter' pour terminer.\n")
 
-    # On conserve sa demande dans l'historique.
-    messages.append(response)
+    while True:
+        user_input = input("Vous : ").strip()
 
-    if response.tool_calls:
-        for tool_call in response.tool_calls:
-            # Notre programme contrôle les outils autorisés.
-            if tool_call["name"] != "list_my_transactions":
-                raise ValueError(f"Outil inconnu : {tool_call['name']}")
+        if user_input.lower() in {"quitter", "exit"}:
+            print("NovBank — À bientôt.")
+            break
 
-            print(f"\nExécution de l'outil : {tool_call['name']}")
+        if not user_input:
+            continue
 
-            # 2. Python exécute l'outil, qui interroge SQLite.
-            tool_message = list_my_transactions.invoke(tool_call)
+        messages.append(HumanMessage(content=user_input))
 
-            print("Résultat de l'outil :")
-            print(tool_message.content)
+        result = graph.invoke(
+            {"messages": messages},
+            config={"recursion_limit": 10},
+        )
 
-            # Le résultat rejoint l'historique transmis au modèle.
-            messages.append(tool_message)
+        # Récupération de l'historique enrichi par le graphe.
+        messages = result["messages"]
 
-        # 3. Le modèle formule sa réponse à partir des résultats.
-        final_response = model.invoke(messages)
-    else:
-        # Le modèle a répondu directement, sans demander d'outil.
-        final_response = response
-
-    print("\nRéponse de NovBank :")
-    print(final_response.content)
+        print(f"\nNovBank : {messages[-1].content}\n")
 
 if __name__ == "__main__":
     main()

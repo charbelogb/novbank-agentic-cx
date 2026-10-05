@@ -1,45 +1,45 @@
-import sqlite3
+import os
 from pathlib import Path
 from pprint import pprint
 
+from dotenv import load_dotenv
+from supabase import Client, create_client
 
-DB_PATH = Path(__file__).parent / "novabank.db"
+
+load_dotenv(Path(__file__).parent / ".env")
+
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+if not supabase_url or not supabase_key:
+    raise RuntimeError(
+        "SUPABASE_URL et SUPABASE_SECRET_KEY doivent être "
+        "renseignées dans le fichier .env."
+    )
+
+supabase: Client = create_client(supabase_url, supabase_key)
 
 
 def get_customer_transactions(customer_id: str) -> list[dict]:
-    """Consulte les transactions du client dans la base bancaire fictive."""
-    if not DB_PATH.exists():
-        raise FileNotFoundError(
-            "Base absente. Exécute d'abord : python init_db.py"
+    """Consulte les transactions du client dans Supabase."""
+    if not customer_id or not customer_id.strip():
+        raise ValueError("Le customer_id est obligatoire.")
+
+    response = (
+        supabase.table("transactions")
+        .select(
+            "transaction_id, transaction_date, type, "
+            "amount, currency, status, description"
         )
+        .eq("customer_id", customer_id)
+        .order("transaction_date", desc=True)
+        .order("transaction_id")
+        .execute()
+    )
 
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-
-    try:
-        rows = connection.execute(
-            """
-            SELECT
-                transaction_id,
-                transaction_date,
-                type,
-                amount,
-                currency,
-                status,
-                description
-            FROM transactions
-            WHERE customer_id = ?
-            ORDER BY transaction_date DESC, transaction_id
-            """,
-            (customer_id,),
-        ).fetchall()
-
-        return [dict(row) for row in rows]
-    finally:
-        connection.close()
+    return response.data
 
 
 if __name__ == "__main__":
-    current_customer_id = "CUST-001"
-    transactions = get_customer_transactions(current_customer_id)
+    transactions = get_customer_transactions("CUST-001")
     pprint(transactions, sort_dicts=False)
