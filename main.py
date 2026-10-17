@@ -39,6 +39,56 @@ def get_customer_transactions(customer_id: str) -> list[dict]:
 
     return response.data
 
+def get_customer_transaction(
+        customer_id: str,
+        transaction_id: str,
+) -> dict:
+    """Retourne une transaction appartenant au client identifié."""
+    if not customer_id or not customer_id.strip():
+        raise ValueError("Le customer_id est obligatoire.")
+
+    if not transaction_id or not transaction_id.strip():
+        raise ValueError("Le transaction_id est obligatoire.")
+
+    response = (
+        supabase.table("transactions")
+        .select(
+            "transaction_id, transaction_date, type, "
+            "amount, currency, status, description"
+        )
+        .eq("customer_id", customer_id)
+        .eq("transaction_id", transaction_id)
+        .execute()
+    )
+
+    if not response.data:
+        raise ValueError(
+            "Transaction introuvable pour le client identifié."
+        )
+
+    return response.data[0]
+
+def get_active_complaint(
+        customer_id: str,
+        transaction_id: str,
+) -> dict | None:
+    """Recherche une réclamation active pour un retrait du client."""
+    # Vérifie l'appartenance avant de consulter les réclamations.
+    get_customer_transaction(customer_id, transaction_id)
+
+    response = (
+        supabase.table("complaints")
+        .select(
+            "id, transaction_id, category, status, "
+            "description, created_at"
+        )
+        .eq("transaction_id", transaction_id)
+        .eq("category", "ATM_CASH_NOT_RECEIVED")
+        .in_("status", ["OPEN", "IN_PROGRESS"])
+        .execute()
+    )
+
+    return response.data[0] if response.data else None
 
 if __name__ == "__main__":
     transactions = get_customer_transactions("CUST-001")
